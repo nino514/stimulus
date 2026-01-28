@@ -1,0 +1,20 @@
+# Environment files (contain secrets)
+.env
+
+# Output files
+orders_export.csv
+
+# Processed/failed files
+processed/
+failed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
