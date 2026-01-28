@@ -3,16 +3,27 @@
 Extract order data from Stimulus Athletic Excel invoice files.
 
 Usage:
-    python extract_orders.py <input.xlsx> <output.csv>
+    python extract_orders.py                         # Batch mode: process all .xlsx in current folder
+    python extract_orders.py <input.xlsx> <output.csv>  # Single file mode
 
-Example:
-    python extract_orders.py sample_orders/invoice.xlsx orders_extracted.csv
+Examples:
+    python extract_orders.py                         # Creates all_orders_extracted.csv
+    python extract_orders.py invoice.xlsx orders.csv # Process single file
 """
 
 import sys
 import csv
 from pathlib import Path
 from openpyxl import load_workbook
+
+
+# CSV column order
+FIELDNAMES = [
+    "order_id", "date_of_order", "customer_name", "customer_email",
+    "phone", "billing_address", "delivery_address", "product_description",
+    "personalization_name", "gender", "jersey_size", "shorts_size",
+    "socks_size", "item_number", "quantity", "unit_price", "total_price"
+]
 
 
 def find_cell_value(sheet, search_text):
@@ -202,9 +213,12 @@ def extract_personalization_data(sheet, section_row, column_map, has_sub_header)
     return rows
 
 
-def extract_orders(input_path, output_path):
-    """Main extraction function."""
-    print(f"Loading: {input_path}")
+def extract_from_file(input_path, verbose=True):
+    """Extract all records from a single Excel file. Returns list of records."""
+    if verbose:
+        print(f"\nProcessing: {input_path.name}")
+        print("-" * 50)
+
     workbook = load_workbook(input_path, data_only=True)
     sheet = workbook.active
 
@@ -217,17 +231,12 @@ def extract_orders(input_path, output_path):
     billing_address = find_cell_value(sheet, "BILLING ADDRESS")
     delivery_address = find_cell_value(sheet, "DELIVERY ADDRESS")
 
-    print(f"Order ID: {order_id}")
-    print(f"Date: {date_of_order}")
-    print(f"Customer: {customer_name}")
-    print(f"Email: {customer_email}")
-    print(f"Phone: {phone}")
-    print(f"Billing: {billing_address}")
-    print(f"Delivery: {delivery_address}")
+    if verbose:
+        print(f"  Order ID: {order_id}")
+        print(f"  Customer: {customer_name}")
 
     # Step 2: Find all personalization sections
     personalization_rows = find_personalization_sections(sheet)
-    print(f"\nFound {len(personalization_rows)} personalization section(s)")
 
     # Step 3: Extract data from each section
     all_records = []
@@ -235,24 +244,18 @@ def extract_orders(input_path, output_path):
     for section_row in personalization_rows:
         # Find product description above this section
         product_desc = find_product_description_above(sheet, section_row)
-        print(f"  Section at row {section_row}: {product_desc[:50]}...")
 
         # Parse header row to get column positions
         header_row = section_row + 1
         column_map, has_sub_header = parse_header_row(sheet, header_row)
 
-        if has_sub_header:
-            print(f"  Detected merged SIZE header with sub-headers")
-
         if not column_map:
-            print(f"  Warning: Could not find column headers at row {header_row}")
+            if verbose:
+                print(f"  Warning: Could not find column headers at row {header_row}")
             continue
-
-        print(f"  Column map: {column_map}")
 
         # Extract personalization rows
         rows = extract_personalization_data(sheet, section_row, column_map, has_sub_header)
-        print(f"  Extracted {len(rows)} personalization row(s)")
 
         # Add order metadata to each row
         for row in rows:
@@ -277,37 +280,99 @@ def extract_orders(input_path, output_path):
             }
             all_records.append(record)
 
-    # Step 4: Write CSV output
-    fieldnames = [
-        "order_id", "date_of_order", "customer_name", "customer_email",
-        "phone", "billing_address", "delivery_address", "product_description",
-        "personalization_name", "gender", "jersey_size", "shorts_size",
-        "socks_size", "item_number", "quantity", "unit_price", "total_price"
-    ]
+    if verbose:
+        print(f"  Extracted: {len(all_records)} rows")
 
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_records)
-
-    print(f"\nWrote {len(all_records)} records to: {output_path}")
     return all_records
 
 
+def write_csv(records, output_path):
+    """Write records to CSV file."""
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(records)
+
+
+def process_single_file(input_path, output_path):
+    """Process a single Excel file and write to CSV."""
+    records = extract_from_file(input_path, verbose=True)
+    write_csv(records, output_path)
+    print(f"\nWrote {len(records)} records to: {output_path}")
+
+
+def process_batch():
+    """Process all .xlsx files in current directory and combine into one CSV."""
+    current_dir = Path(".")
+    xlsx_files = sorted(current_dir.glob("*.xlsx"))
+
+    if not xlsx_files:
+        print("No .xlsx files found in current directory.")
+        print("Place your Excel order files here and run again.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("BATCH PROCESSING MODE")
+    print("=" * 60)
+    print(f"Found {len(xlsx_files)} Excel file(s) to process:\n")
+
+    for f in xlsx_files:
+        print(f"  - {f.name}")
+
+    all_records = []
+    files_processed = 0
+    files_failed = []
+
+    for xlsx_file in xlsx_files:
+        try:
+            records = extract_from_file(xlsx_file, verbose=True)
+            all_records.extend(records)
+            files_processed += 1
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            files_failed.append((xlsx_file.name, str(e)))
+
+    # Write combined CSV
+    output_path = Path("all_orders_extracted.csv")
+    write_csv(all_records, output_path)
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"  Total files processed: {files_processed}")
+    if files_failed:
+        print(f"  Files with errors: {len(files_failed)}")
+        for name, error in files_failed:
+            print(f"    - {name}: {error}")
+    print(f"  Total rows extracted: {len(all_records)}")
+    print(f"  Output saved to: {output_path.absolute()}")
+    print("=" * 60)
+
+
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python extract_orders.py <input.xlsx> <output.csv>")
-        print("Example: python extract_orders.py invoice.xlsx orders.csv")
+    if len(sys.argv) == 1:
+        # No arguments: batch mode
+        process_batch()
+    elif len(sys.argv) == 3:
+        # Two arguments: single file mode
+        input_path = Path(sys.argv[1])
+        output_path = Path(sys.argv[2])
+
+        if not input_path.exists():
+            print(f"Error: Input file not found: {input_path}")
+            sys.exit(1)
+
+        process_single_file(input_path, output_path)
+    else:
+        print("Usage:")
+        print("  python extract_orders.py                           # Batch: process all .xlsx files")
+        print("  python extract_orders.py <input.xlsx> <output.csv> # Single file mode")
+        print()
+        print("Examples:")
+        print("  python extract_orders.py                           # Creates all_orders_extracted.csv")
+        print("  python extract_orders.py invoice.xlsx orders.csv   # Process one file")
         sys.exit(1)
-
-    input_path = Path(sys.argv[1])
-    output_path = Path(sys.argv[2])
-
-    if not input_path.exists():
-        print(f"Error: Input file not found: {input_path}")
-        sys.exit(1)
-
-    extract_orders(input_path, output_path)
 
 
 if __name__ == "__main__":
