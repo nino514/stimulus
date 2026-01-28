@@ -13,16 +13,18 @@ Examples:
 
 import sys
 import csv
+import re
 from pathlib import Path
 from openpyxl import load_workbook
 
 
 # CSV column order
 FIELDNAMES = [
-    "order_id", "date_of_order", "customer_name", "customer_email",
-    "phone", "billing_address", "delivery_address", "product_description",
-    "personalization_name", "gender", "jersey_size", "shorts_size",
-    "socks_size", "item_number", "quantity", "unit_price", "total_price"
+    "order_id", "account_name", "order_month", "date_of_order",
+    "customer_name", "customer_email", "phone", "billing_address",
+    "delivery_address", "product_description", "personalization_name",
+    "gender", "jersey_size", "shorts_size", "socks_size", "item_number",
+    "quantity", "unit_price", "total_price"
 ]
 
 
@@ -36,6 +38,64 @@ def find_cell_value(sheet, search_text):
                 for next_cell in row[i + 1:]:
                     if next_cell.value and str(next_cell.value).strip():
                         return str(next_cell.value).strip()
+    return ""
+
+
+def find_title_row(sheet):
+    """
+    Find the title row containing account name and order month.
+    Looks for pattern like "WILLMAR CARDINALS (DECEMBER 2025)" in first few rows.
+    Returns the full title string.
+    """
+    # Check first 10 rows for a cell containing parentheses (month/year pattern)
+    for row_idx in range(1, 11):
+        for cell in sheet[row_idx]:
+            if cell.value:
+                text = str(cell.value).strip()
+                # Look for pattern with parentheses containing month/year
+                if "(" in text and ")" in text:
+                    # Verify it looks like a title (has month name)
+                    months = ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+                              "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"]
+                    if any(month in text.upper() for month in months):
+                        return text
+    return ""
+
+
+def parse_account_and_month(title):
+    """
+    Parse title like "WILLMAR CARDINALS (DECEMBER 2025)" into account_name and order_month.
+    Returns (account_name, order_month) tuple.
+    """
+    if not title:
+        return "", ""
+
+    # Match pattern: "anything (anything)"
+    match = re.match(r"^(.+?)\s*\((.+?)\)\s*$", title)
+    if match:
+        account_name = match.group(1).strip()
+        order_month = match.group(2).strip()
+        return account_name, order_month
+
+    # No parentheses found, return whole thing as account name
+    return title, ""
+
+
+def find_shipping_fee(sheet):
+    """Find the shipping fee value from the ORDER SUMMARY section."""
+    for row in sheet.iter_rows():
+        for i, cell in enumerate(row):
+            if cell.value and "SHIPPING" in str(cell.value).upper():
+                # Look for next non-empty cell with a price value
+                for next_cell in row[i + 1:]:
+                    if next_cell.value:
+                        value = str(next_cell.value).strip()
+                        # Check if it looks like a price
+                        if value.startswith("$") or value.replace(".", "").isdigit():
+                            # Clean the price
+                            if value.startswith("$"):
+                                value = value[1:]
+                            return value
     return ""
 
 
@@ -231,15 +291,38 @@ def extract_from_file(input_path, verbose=True):
     billing_address = find_cell_value(sheet, "BILLING ADDRESS")
     delivery_address = find_cell_value(sheet, "DELIVERY ADDRESS")
 
+    # Extract account name and order month from title row
+    title = find_title_row(sheet)
+    account_name, order_month = parse_account_and_month(title)
+
+    # Find shipping fee
+    shipping_fee = find_shipping_fee(sheet)
+
     if verbose:
-        print(f"  Order ID: {order_id}")
+        print(f"  Account: {account_name}")
+        print(f"  Order Month: {order_month}")
         print(f"  Customer: {customer_name}")
+        if shipping_fee:
+            print(f"  Shipping Fee: ${shipping_fee}")
 
     # Step 2: Find all personalization sections
     personalization_rows = find_personalization_sections(sheet)
 
     # Step 3: Extract data from each section
     all_records = []
+
+    # Base metadata for all records
+    base_metadata = {
+        "order_id": order_id,
+        "account_name": account_name,
+        "order_month": order_month,
+        "date_of_order": date_of_order,
+        "customer_name": customer_name,
+        "customer_email": customer_email,
+        "phone": phone,
+        "billing_address": billing_address,
+        "delivery_address": delivery_address,
+    }
 
     for section_row in personalization_rows:
         # Find product description above this section
@@ -260,13 +343,7 @@ def extract_from_file(input_path, verbose=True):
         # Add order metadata to each row
         for row in rows:
             record = {
-                "order_id": order_id,
-                "date_of_order": date_of_order,
-                "customer_name": customer_name,
-                "customer_email": customer_email,
-                "phone": phone,
-                "billing_address": billing_address,
-                "delivery_address": delivery_address,
+                **base_metadata,
                 "product_description": product_desc,
                 "personalization_name": row.get("personalization_name", ""),
                 "gender": row.get("gender", ""),
@@ -280,8 +357,26 @@ def extract_from_file(input_path, verbose=True):
             }
             all_records.append(record)
 
+    # Step 4: Add shipping fee as a line item (if found)
+    if shipping_fee:
+        shipping_record = {
+            **base_metadata,
+            "product_description": "SHIPPING FEE",
+            "personalization_name": "",
+            "gender": "",
+            "jersey_size": "",
+            "shorts_size": "",
+            "socks_size": "",
+            "item_number": "",
+            "quantity": "1",
+            "unit_price": shipping_fee,
+            "total_price": shipping_fee,
+        }
+        all_records.append(shipping_record)
+
     if verbose:
-        print(f"  Extracted: {len(all_records)} rows")
+        product_rows = len(all_records) - (1 if shipping_fee else 0)
+        print(f"  Extracted: {product_rows} product rows + {1 if shipping_fee else 0} shipping row = {len(all_records)} total")
 
     return all_records
 
