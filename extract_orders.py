@@ -54,13 +54,15 @@ def find_product_description_above(sheet, start_row):
 
 
 def parse_header_row(sheet, header_row_idx):
-    """Parse the header row to find column indices for each field."""
+    """
+    Parse the header row to find column indices for each field.
+    Handles merged 'SIZE' header with sub-headers (JERSEY, SHORTS, SOCKS) in row below.
+    """
     column_map = {}
+
+    # Mappings for main header row
     header_mappings = {
         "GENDER": "gender",
-        "JERSEY": "jersey_size",
-        "SHORTS": "shorts_size",
-        "SOCKS": "socks_size",
         "NAME": "personalization_name",
         "INITIALS OR NUMBER": "item_number",
         "INITIALS/NUMBER": "item_number",
@@ -71,17 +73,52 @@ def parse_header_row(sheet, header_row_idx):
         "TOTAL PRICE": "total_price",
     }
 
+    # Mappings for sub-header row (under SIZE)
+    size_sub_mappings = {
+        "JERSEY": "jersey_size",
+        "SHORTS": "shorts_size",
+        "SOCKS": "socks_size",
+    }
+
+    has_size_header = False
+
+    # First pass: scan main header row
     for cell in sheet[header_row_idx]:
         if cell.value:
             cell_text = str(cell.value).upper().strip()
+
+            # Check if this is a merged SIZE header
+            if "SIZE" in cell_text and cell_text not in ("JERSEY SIZE", "SHORTS SIZE", "SOCKS SIZE"):
+                has_size_header = True
+                continue
+
+            # Check against main mappings
             for header_text, field_name in header_mappings.items():
                 if header_text in cell_text:
-                    # Don't overwrite if already found (prioritize exact matches)
                     if field_name not in column_map:
                         column_map[field_name] = cell.column - 1  # 0-indexed
                     break
 
-    return column_map
+            # Also check for size columns in main header (in case they're not merged)
+            for header_text, field_name in size_sub_mappings.items():
+                if header_text in cell_text:
+                    if field_name not in column_map:
+                        column_map[field_name] = cell.column - 1
+                    break
+
+    # Second pass: if SIZE header found, scan sub-header row below
+    if has_size_header:
+        sub_header_row_idx = header_row_idx + 1
+        for cell in sheet[sub_header_row_idx]:
+            if cell.value:
+                cell_text = str(cell.value).upper().strip()
+                for header_text, field_name in size_sub_mappings.items():
+                    if header_text in cell_text:
+                        if field_name not in column_map:
+                            column_map[field_name] = cell.column - 1
+                        break
+
+    return column_map, has_size_header
 
 
 def clean_price(value):
@@ -116,11 +153,16 @@ def is_skip_row(row_values):
     return any(kw in row_text for kw in skip_keywords)
 
 
-def extract_personalization_data(sheet, section_row, column_map):
+def extract_personalization_data(sheet, section_row, column_map, has_sub_header):
     """Extract all data rows from a personalization section."""
     rows = []
     header_row = section_row + 1  # Header is right after PERSONALIZATION
-    data_start = header_row + 1   # Data starts after header
+
+    # If there's a sub-header row (for SIZE columns), data starts 2 rows after header
+    if has_sub_header:
+        data_start = header_row + 2
+    else:
+        data_start = header_row + 1
 
     max_col = max(column_map.values()) + 1 if column_map else 15
 
@@ -141,7 +183,7 @@ def extract_personalization_data(sheet, section_row, column_map):
             continue
 
         # Skip if this looks like a header row (contains GENDER text)
-        if "GENDER" in row_text and "SIZE" in row_text:
+        if "GENDER" in row_text and ("SIZE" in row_text or "NAME" in row_text):
             continue
 
         # Extract data using column map
@@ -168,16 +210,24 @@ def extract_orders(input_path, output_path):
 
     # Step 1: Extract order metadata
     order_id = find_cell_value(sheet, "ORDER ID")
+    date_of_order = find_cell_value(sheet, "DATE OF ORDER")
     customer_name = find_cell_value(sheet, "RECEIVER'S NAME")
     customer_email = find_cell_value(sheet, "EMAIL ADDRESS")
+    phone = find_cell_value(sheet, "TELEPHONE")
+    billing_address = find_cell_value(sheet, "BILLING ADDRESS")
+    delivery_address = find_cell_value(sheet, "DELIVERY ADDRESS")
 
     print(f"Order ID: {order_id}")
+    print(f"Date: {date_of_order}")
     print(f"Customer: {customer_name}")
     print(f"Email: {customer_email}")
+    print(f"Phone: {phone}")
+    print(f"Billing: {billing_address}")
+    print(f"Delivery: {delivery_address}")
 
     # Step 2: Find all personalization sections
     personalization_rows = find_personalization_sections(sheet)
-    print(f"Found {len(personalization_rows)} personalization section(s)")
+    print(f"\nFound {len(personalization_rows)} personalization section(s)")
 
     # Step 3: Extract data from each section
     all_records = []
@@ -189,22 +239,31 @@ def extract_orders(input_path, output_path):
 
         # Parse header row to get column positions
         header_row = section_row + 1
-        column_map = parse_header_row(sheet, header_row)
+        column_map, has_sub_header = parse_header_row(sheet, header_row)
+
+        if has_sub_header:
+            print(f"  Detected merged SIZE header with sub-headers")
 
         if not column_map:
             print(f"  Warning: Could not find column headers at row {header_row}")
             continue
 
+        print(f"  Column map: {column_map}")
+
         # Extract personalization rows
-        rows = extract_personalization_data(sheet, section_row, column_map)
+        rows = extract_personalization_data(sheet, section_row, column_map, has_sub_header)
         print(f"  Extracted {len(rows)} personalization row(s)")
 
         # Add order metadata to each row
         for row in rows:
             record = {
                 "order_id": order_id,
+                "date_of_order": date_of_order,
                 "customer_name": customer_name,
                 "customer_email": customer_email,
+                "phone": phone,
+                "billing_address": billing_address,
+                "delivery_address": delivery_address,
                 "product_description": product_desc,
                 "personalization_name": row.get("personalization_name", ""),
                 "gender": row.get("gender", ""),
@@ -220,7 +279,8 @@ def extract_orders(input_path, output_path):
 
     # Step 4: Write CSV output
     fieldnames = [
-        "order_id", "customer_name", "customer_email", "product_description",
+        "order_id", "date_of_order", "customer_name", "customer_email",
+        "phone", "billing_address", "delivery_address", "product_description",
         "personalization_name", "gender", "jersey_size", "shorts_size",
         "socks_size", "item_number", "quantity", "unit_price", "total_price"
     ]
