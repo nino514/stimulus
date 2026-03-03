@@ -266,8 +266,9 @@ def extract_personalization_data(sheet, section_row, column_map, has_sub_header)
             else:
                 row_data[field_name] = clean_value(value)
 
-        # Only add row if it has some identifying data
-        if row_data.get("gender") or row_data.get("personalization_name") or row_data.get("item_number"):
+        # Only add row if it has a quantity
+        quantity = row_data.get("quantity", "")
+        if quantity and str(quantity).strip() not in ("", "0"):
             rows.append(row_data)
 
     return rows
