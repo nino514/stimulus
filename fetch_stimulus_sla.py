@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DASHBOARD_UUID = "6b6cac6b-360d-405f-9596-39e10cd58ce2"
-BASE_URL = (
-    f"https://bi.pondthreadsoms.com/api/public/dashboard/{DASHBOARD_UUID}/card/{{card_id}}"
-)
+DASHBOARD_URL = f"https://bi.pondthreadsoms.com/api/public/dashboard/{DASHBOARD_UUID}"
+DASHCARD_URL = DASHBOARD_URL + "/dashcard/{dashcard_id}/card/{card_id}"
+
 SHEET_NAME = "Stimulus SLA Tracker"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -66,33 +66,44 @@ SNAPSHOT_COLUMNS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def fetch_card(card_id: int) -> dict | None:
-    url = BASE_URL.format(card_id=card_id)
-    log.info("Fetching card %s from %s", card_id, url)
+def get_dashcard_map() -> dict[int, int]:
+    """Fetch the public dashboard and return {card_id: dashcard_id}."""
+    log.info("Fetching dashboard metadata from %s", DASHBOARD_URL)
+    resp = requests.get(DASHBOARD_URL, timeout=30)
+    resp.raise_for_status()
+    dashboard = resp.json()
+
+    mapping: dict[int, int] = {}
+    for dashcard in dashboard.get("dashcards", []):
+        card = dashcard.get("card") or {}
+        card_id = card.get("id")
+        dashcard_id = dashcard.get("id")
+        if card_id and dashcard_id:
+            mapping[card_id] = dashcard_id
+            log.info("  card_id=%s -> dashcard_id=%s", card_id, dashcard_id)
+
+    log.info("Found %d dashcard mappings", len(mapping))
+    return mapping
+
+
+def fetch_card(card_id: int, dashcard_id: int) -> dict | None:
+    url = DASHCARD_URL.format(dashcard_id=dashcard_id, card_id=card_id)
+    log.info("Fetching card %s (dashcard %s)", card_id, dashcard_id)
     try:
-        # Metabase public dashboard card endpoints require POST with parameters
         resp = requests.post(url, json={"parameters": []}, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
-        # Log top-level keys to help diagnose unexpected response shapes
-        log.info("Card %s response keys: %s", card_id, list(data.keys()) if isinstance(data, dict) else type(data).__name__)
-        return data
+        return resp.json()
     except Exception as exc:
         log.error("Failed to fetch card %s: %s", card_id, exc)
         return None
 
 
 def extract_scalar(data: dict) -> object:
-    """Pull a single value out of a Metabase scalar card response.
-
-    Tries the most common response shapes:
-      1. data["data"]["rows"][0][0]  (standard query result)
-      2. data["data"]["native_form"]  (some scalar displays)
-    """
+    """Pull a single value out of a Metabase scalar card response."""
     try:
         rows = data["data"]["rows"]
         if rows:
-            log.info("Scalar rows[0]: %s", rows[0])
+            log.info("  rows[0] = %s", rows[0])
             return rows[0][0]
     except (KeyError, IndexError, TypeError):
         pass
@@ -144,14 +155,19 @@ def main():
     sheet = gc.open(SHEET_NAME)
     log.info("Opened sheet '%s'", SHEET_NAME)
 
+    # --- Build card_id -> dashcard_id map ---
+    dashcard_map = get_dashcard_map()
+
     # --- Scalar cards ---
     scalar_values: dict[str, object] = {}
     for card_id, col_name in SCALAR_CARDS.items():
-        data = fetch_card(card_id)
-        if data is None:
+        dashcard_id = dashcard_map.get(card_id)
+        if dashcard_id is None:
+            log.warning("card_id=%s not found in dashboard, skipping", card_id)
             scalar_values[col_name] = None
-        else:
-            scalar_values[col_name] = extract_scalar(data)
+            continue
+        data = fetch_card(card_id, dashcard_id)
+        scalar_values[col_name] = extract_scalar(data) if data else None
         log.info("Scalar card %s (%s) = %s", card_id, col_name, scalar_values[col_name])
 
     # Write snapshot row
@@ -162,7 +178,11 @@ def main():
 
     # --- Series cards ---
     for card_id, tab_name in SERIES_CARDS.items():
-        data = fetch_card(card_id)
+        dashcard_id = dashcard_map.get(card_id)
+        if dashcard_id is None:
+            log.warning("card_id=%s not found in dashboard, skipping tab '%s'", card_id, tab_name)
+            continue
+        data = fetch_card(card_id, dashcard_id)
         if data is None:
             log.warning("Skipping series card %s (%s) due to fetch error", card_id, tab_name)
             continue
