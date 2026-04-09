@@ -70,19 +70,29 @@ def fetch_card(card_id: int) -> dict | None:
     url = BASE_URL.format(card_id=card_id)
     log.info("Fetching card %s from %s", card_id, url)
     try:
-        resp = requests.get(url, timeout=30)
+        # Metabase public dashboard card endpoints require POST with parameters
+        resp = requests.post(url, json={"parameters": []}, timeout=30)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # Log top-level keys to help diagnose unexpected response shapes
+        log.info("Card %s response keys: %s", card_id, list(data.keys()) if isinstance(data, dict) else type(data).__name__)
+        return data
     except Exception as exc:
         log.error("Failed to fetch card %s: %s", card_id, exc)
         return None
 
 
-def extract_scalar(data: dict) -> str | None:
-    """Pull a single value out of a Metabase scalar card response."""
+def extract_scalar(data: dict) -> object:
+    """Pull a single value out of a Metabase scalar card response.
+
+    Tries the most common response shapes:
+      1. data["data"]["rows"][0][0]  (standard query result)
+      2. data["data"]["native_form"]  (some scalar displays)
+    """
     try:
         rows = data["data"]["rows"]
         if rows:
+            log.info("Scalar rows[0]: %s", rows[0])
             return rows[0][0]
     except (KeyError, IndexError, TypeError):
         pass
